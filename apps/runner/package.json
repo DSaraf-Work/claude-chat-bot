@@ -26,6 +26,7 @@
     "yaml": "^2.4.0",
     "zod": "^3.23.0",
     "pino": "^9.3.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "@anthropic-ai/claude-agent-sdk": "latest"
   }
 }

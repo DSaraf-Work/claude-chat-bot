@@ -29,6 +29,13 @@ export const RunnerConfigSchema = z.object({
     // Path to SQLite DB file (Phase 0)
     path: z.string().default('~/.claude-ui/runner.db'),
   }).default({}),
+
+  sdk: z.object({
+    settingSources: z.array(z.enum(['user', 'project', 'local'])).default(['project']),
+    maxTurns: z.number().int().min(1).max(100).default(10),
+    allowedTools: z.array(z.string()).optional(),
+    model: z.string().default('claude-sonnet-4-5'),
+  }).default({}),
 })
 
 export type RunnerConfig = z.infer<typeof RunnerConfigSchema>
