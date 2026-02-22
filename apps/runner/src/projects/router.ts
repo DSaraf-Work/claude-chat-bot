@@ -3,6 +3,7 @@ import { newProjectId } from '@claude-ui/shared'
 import { discoverProjects, type DiscoveredProject } from './scanner.js'
 import type { RunnerConfig } from '../config/schema.js'
 import type { Logger } from '@claude-ui/shared'
+import { projectStore } from '../sessions/router.js'
 
 interface ProjectsRouterOpts {
   config: RunnerConfig
@@ -22,17 +23,22 @@ const projectsRouter: FastifyPluginAsync<ProjectsRouterOpts> = async (fastify, o
         logger: opts.logger,
       })
 
-      return {
-        projects: discovered.map((p: DiscoveredProject) => ({
-          id: newProjectId(), // deterministic in real impl; stateless scan for now
-          name: p.name,
-          rootPath: p.rootPath,
-          gitRemote: p.gitRemote,
-          gitBranch: p.gitBranch,
-          isDirty: p.isDirty,
-          lastSessionAt: p.lastSessionAt,
-        })),
+      const projectsList = discovered.map((p: DiscoveredProject) => ({
+        id: newProjectId(), // deterministic in real impl; stateless scan for now
+        name: p.name,
+        rootPath: p.rootPath,
+        gitRemote: p.gitRemote,
+        gitBranch: p.gitBranch,
+        isDirty: p.isDirty,
+        lastSessionAt: p.lastSessionAt,
+      }))
+
+      // Populate projectStore so sessions can reference projects
+      for (const p of projectsList) {
+        projectStore.set(p.id, { id: p.id, path: p.rootPath, name: p.name })
       }
+
+      return { projects: projectsList }
     },
   )
 }
