@@ -1,25 +1,28 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useApi, useWebSocket } from '../hooks/index.js'
 import { useSessionStore } from '../store/session.store.js'
+import { useTimelineStore } from '../store/timeline.store.js'
 import { ChatTimeline } from '../components/ChatTimeline.js'
+import { ApprovalModal } from '../components/ApprovalModal.js'
+import { ChatInput } from '../components/ChatInput.js'
 
 // ---------------------------------------------------------------------------
-// Types for API responses
+// Types matching the actual runner API responses
 // ---------------------------------------------------------------------------
 
 interface ApiProject {
   id: string
   name: string
-  path: string
-  sessionCount: number
+  rootPath: string
 }
 
 interface ApiSession {
-  id: string
+  sessionId: string
   projectId: string
-  mode: 'sdk' | 'pty'
+  mode?: 'sdk' | 'pty'
   status: string
-  title?: string
+  permissionMode: string
+  sdkSessionId: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -39,12 +42,12 @@ function Sidebar() {
   // Load projects on mount
   useEffect(() => {
     let cancelled = false
-    api.get<{ data: ApiProject[] }>('/api/v1/projects')
+    api.get<{ projects: ApiProject[] }>('/api/v1/projects')
       .then((res) => {
-        if (!cancelled) setProjects(res.data)
+        if (!cancelled) setProjects(res.projects)
       })
       .catch(() => {
-        // silently ignore
+        // silently ignore — runner may not be ready yet
       })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -56,10 +59,9 @@ function Sidebar() {
       return
     }
     setExpandedProjectId(projectId)
-    // Fetch sessions for this project
-    api.get<{ data: ApiSession[] }>(`/api/v1/projects/${projectId}/sessions`)
+    api.get<{ sessions: ApiSession[] }>(`/api/v1/projects/${projectId}/sessions`)
       .then((res) => {
-        setProjectSessions((prev) => ({ ...prev, [projectId]: res.data }))
+        setProjectSessions((prev) => ({ ...prev, [projectId]: res.sessions }))
       })
       .catch(() => {
         // silently ignore
@@ -69,18 +71,17 @@ function Sidebar() {
   const handleNewSession = useCallback(async (projectId: string) => {
     setLoading(true)
     try {
-      const res = await api.post<ApiSession>(`/api/v1/projects/${projectId}/sessions`, { mode: 'sdk' })
+      const res = await api.post<ApiSession>(`/api/v1/projects/${projectId}/sessions`, { permissionMode: 'default' })
       upsertSession({
-        sessionId: res.id,
+        sessionId: res.sessionId,
         projectId: res.projectId,
-        mode: res.mode,
+        mode: res.mode ?? 'sdk',
         status: res.status,
-        permissionMode: 'default',
-        sdkSessionId: null,
+        permissionMode: res.permissionMode ?? 'default',
+        sdkSessionId: res.sdkSessionId,
       })
-      setActiveSession(res.id)
-      subscribe(res.id)
-      // Add to project sessions list
+      setActiveSession(res.sessionId)
+      subscribe(res.sessionId)
       setProjectSessions((prev) => ({
         ...prev,
         [projectId]: [...(prev[projectId] ?? []), res],
@@ -117,20 +118,19 @@ function Sidebar() {
               gap: 6,
             }}
           >
-            <span style={{ fontSize: 10 }}>{expandedProjectId === project.id ? '\u25BC' : '\u25B6'}</span>
+            <span style={{ fontSize: 10 }}>{expandedProjectId === project.id ? '▼' : '▶'}</span>
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{project.name}</span>
           </div>
           {expandedProjectId === project.id && (
             <div style={{ paddingLeft: 12 }}>
               {(projectSessions[project.id] ?? []).map((sess) => {
-                const isActive = activeSessionId === sess.id
-                // Also check if we have a local session for this
-                const localSess = sessions[sess.id]
-                const label = sess.title ?? localSess?.sessionId?.slice(0, 8) ?? sess.id.slice(0, 8)
+                const isActive = activeSessionId === sess.sessionId
+                const localSess = sessions[sess.sessionId]
+                const label = localSess?.sessionId?.slice(0, 8) ?? sess.sessionId.slice(0, 8)
                 return (
                   <div
-                    key={sess.id}
-                    onClick={() => handleSessionClick(sess.id)}
+                    key={sess.sessionId}
+                    onClick={() => handleSessionClick(sess.sessionId)}
                     style={{
                       padding: '6px 16px',
                       cursor: 'pointer',
@@ -174,6 +174,8 @@ function Sidebar() {
 
 function ChatView() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const sessions = useSessionStore((s) => s.sessions)
+  const { streaming, pendingApproval, setPendingApproval } = useTimelineStore()
 
   if (!activeSessionId) {
     return (
@@ -183,11 +185,22 @@ function ChatView() {
     )
   }
 
+  const session = sessions[activeSessionId]
+  // Disable input while streaming or session status is 'streaming'
+  const isStreaming = !!streaming[activeSessionId] || session?.status === 'streaming'
+  const approval = pendingApproval[activeSessionId]
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <ChatTimeline sessionId={activeSessionId} />
-      {/* ChatInput inserted by M0.5d */}
-      <div id="chat-input-slot" />
+      <ChatInput sessionId={activeSessionId} disabled={isStreaming} />
+      {approval != null && (
+        <ApprovalModal
+          sessionId={activeSessionId}
+          approval={approval}
+          onResolved={() => setPendingApproval(activeSessionId, null)}
+        />
+      )}
     </div>
   )
 }
