@@ -67,7 +67,7 @@ export function adaptSdkMessage(
         }
       }
       // Emit full assistant message
-      const textContent = msg.message.content
+      const textContent = (msg.message.content as Array<{ type: string; text?: string }>)
         .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
         .map((b) => b.text)
         .join('')

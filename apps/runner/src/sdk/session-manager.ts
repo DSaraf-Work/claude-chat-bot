@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
-import type { Query } from '@anthropic-ai/claude-agent-sdk'
+import type { Query, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { createLogger, newSessionId, newCorrelationId } from '@claude-ui/shared'
 import { adaptSdkMessage, emitEvent } from './stream-adapter.js'
 import type { SdkSessionHandle, PermissionMode } from './types.js'
@@ -14,7 +14,7 @@ export interface CreateSessionOpts {
   projectPath: string
   permissionMode?: PermissionMode
   config: RunnerConfig
-  canUseTool?: (toolName: string, input: unknown, opts: { signal: AbortSignal }) => Promise<unknown>
+  canUseTool?: (toolName: string, input: unknown, opts: { signal: AbortSignal }) => Promise<PermissionResult>
 }
 
 export class SessionManager {
@@ -44,7 +44,7 @@ export class SessionManager {
     text: string,
     projectPath: string,
     config: RunnerConfig,
-    canUseTool: (toolName: string, input: unknown, opts: { signal: AbortSignal }) => Promise<unknown>,
+    canUseTool: (toolName: string, input: unknown, opts: { signal: AbortSignal }) => Promise<PermissionResult>,
   ): Promise<void> {
     const handle = this.sessions.get(sessionId)
     if (!handle) throw new Error(`Session ${sessionId} not found`)
