@@ -37,19 +37,23 @@ function tryGitInfo(dir: string): { remote?: string; branch?: string; isDirty: b
   }
 }
 
+function makeProject(rootPath: string, gitInfo: { remote?: string; branch?: string; isDirty: boolean }): DiscoveredProject {
+  return {
+    rootPath,
+    name: path.basename(rootPath),
+    ...(gitInfo.remote !== undefined ? { gitRemote: gitInfo.remote } : {}),
+    ...(gitInfo.branch !== undefined ? { gitBranch: gitInfo.branch } : {}),
+    isDirty: gitInfo.isDirty,
+  }
+}
+
 function scanDir(root: string, depth: number, maxDepth: number, results: DiscoveredProject[]): void {
   if (depth > maxDepth) return
   if (!fs.existsSync(root)) return
 
   if (isGitRepo(root)) {
     const gitInfo = tryGitInfo(root)
-    results.push({
-      rootPath: root,
-      name: path.basename(root),
-      gitRemote: gitInfo.remote,
-      gitBranch: gitInfo.branch,
-      isDirty: gitInfo.isDirty,
-    })
+    results.push(makeProject(root, gitInfo))
     return // don't recurse into nested repos
   }
 
@@ -78,13 +82,7 @@ function readClaudeProjects(logger: Logger): DiscoveredProject[] {
       const decodedPath = entry.name.replace(/-/g, '/')
       if (fs.existsSync(decodedPath) && isGitRepo(decodedPath)) {
         const gitInfo = tryGitInfo(decodedPath)
-        results.push({
-          rootPath: decodedPath,
-          name: path.basename(decodedPath),
-          gitRemote: gitInfo.remote,
-          gitBranch: gitInfo.branch,
-          isDirty: gitInfo.isDirty,
-        })
+        results.push(makeProject(decodedPath, gitInfo))
       }
     }
   } catch (err) {
