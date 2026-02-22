@@ -21,6 +21,8 @@
     "@claude-ui/protocol": "workspace:*",
     "@claude-ui/shared": "workspace:*",
     "fastify": "^5.0.0",
+    "fastify-plugin": "^5.0.0",
+    "yaml": "^2.4.0",
     "zod": "^3.23.0",
     "pino": "^9.3.0"
   }
