@@ -1,0 +1,31 @@
+{
+  "name": "@claude-ui/ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "vite": "^6.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "vitest": "^2.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0"
+  },
+  "dependencies": {
+    "@claude-ui/protocol": "workspace:*",
+    "@claude-ui/shared": "workspace:*",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "zustand": "^5.0.0",
+    "zod": "^3.23.0"
+  }
+}

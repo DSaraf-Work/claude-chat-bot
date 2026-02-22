@@ -1,0 +1,27 @@
+{
+  "name": "@claude-ui/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --watch dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "*",
+    "vitest": "^2.0.0",
+    "@types/node": "^20.0.0"
+  },
+  "dependencies": {
+    "@claude-ui/protocol": "workspace:*",
+    "@claude-ui/shared": "workspace:*",
+    "fastify": "^5.0.0",
+    "zod": "^3.23.0",
+    "pino": "^9.3.0"
+  }
+}
