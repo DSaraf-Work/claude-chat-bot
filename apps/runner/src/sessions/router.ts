@@ -136,6 +136,18 @@ const sessionsRouter: FastifyPluginAsync<SessionsRouterOpts> = async (fastify, o
     },
   )
 
+  // GET /api/v1/sessions/:sessionId -- get single session
+  fastify.get<{ Params: { sessionId: string } }>(
+    '/api/v1/sessions/:sessionId',
+    { preHandler: [fastify.authenticate] },
+    async (request) => {
+      const handle = sessionManager.getHandle(request.params.sessionId)
+      if (!handle) throw new NotFoundError('Session', request.params.sessionId)
+      const { sessionId, projectId, permissionMode, status, sdkSessionId } = handle
+      return { sessionId, projectId, permissionMode, status, sdkSessionId }
+    },
+  )
+
   // DELETE /api/v1/sessions/:sessionId -- end/cancel session
   fastify.delete<{ Params: { sessionId: string } }>(
     '/api/v1/sessions/:sessionId',
