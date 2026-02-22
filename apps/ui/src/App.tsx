@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useSettingsStore } from './store/settings.store.js'
 import { Layout } from './components/Layout.js'
 import { SetupPage } from './pages/SetupPage.js'
+import { useWebSocket } from './hooks/index.js'
 
 // ChatPage will be added in M0.5c
 function PlaceholderChat() {
@@ -10,6 +11,11 @@ function PlaceholderChat() {
       Chat timeline coming in M0.5c
     </div>
   )
+}
+
+function ConnectedApp() {
+  useWebSocket() // starts WS connection for entire app lifetime
+  return <PlaceholderChat />
 }
 
 export function App() {
@@ -27,7 +33,7 @@ export function App() {
 
   return (
     <Layout>
-      <PlaceholderChat />
+      <ConnectedApp />
     </Layout>
   )
 }

@@ -3,10 +3,39 @@ import { createLogger, newEventId } from '@claude-ui/shared'
 import { broadcaster } from '../ws/broadcaster.js'
 import type { PtySessionHandle } from './types.js'
 import type { EventEnvelope } from '@claude-ui/protocol'
+import { chmodSync, existsSync } from 'fs'
+import { createRequire } from 'module'
+import { dirname } from 'path'
 
 const logger = createLogger({ name: 'pty:adapter' })
 
 const RUNNER_ID = `runner_${process.pid}`
+
+// Ensure node-pty's spawn-helper binary is executable.
+// pnpm may install prebuilt binaries without the executable bit set,
+// causing posix_spawnp to fail at runtime.
+function ensureSpawnHelperExecutable(): void {
+  try {
+    const require = createRequire(import.meta.url)
+    const ptyPkgPath = require.resolve('node-pty/package.json')
+    const ptyDir = dirname(ptyPkgPath)
+    const candidates = [
+      `${ptyDir}/prebuilds/darwin-arm64/spawn-helper`,
+      `${ptyDir}/prebuilds/darwin-x64/spawn-helper`,
+    ]
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        chmodSync(candidate, 0o755)
+        logger.debug({ path: candidate }, 'Ensured spawn-helper is executable')
+      }
+    }
+  } catch (err) {
+    // Best-effort: non-fatal. If this fails the PTY spawn will surface its own error.
+    logger.warn({ err }, 'Could not ensure spawn-helper executable bit')
+  }
+}
+
+ensureSpawnHelperExecutable()
 
 export class PtyAdapter {
   private ptySessions = new Map<string, { ptyProcess: pty.IPty; handle: PtySessionHandle }>()
