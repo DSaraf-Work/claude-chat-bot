@@ -96,6 +96,7 @@ export const RunnerConfigSchema = z.object({
   sdk: z.object({
     approvalTimeoutMs: z.number().default(300000),    // 5 min default
     settingSources: z.array(z.string()).default(['project']),
+    maxTurns: z.number().default(10),                 // Max agentic turns per query
   }),
 });
 
@@ -112,9 +113,13 @@ export type RunnerConfig = z.infer<typeof RunnerConfigSchema>;
 
 ### Session Manager
 
+The SDK does **not** expose a session object or an `AgentSDKSession` class. Instead, each call to `query()` returns an `AsyncGenerator` of SDK messages. The session manager stores the internal SDK session ID (captured from the `system init` message) so that subsequent turns can be resumed against the same server-side session.
+
 ```typescript
+import { query, type Query } from '@anthropic-ai/claude-code';
+
 interface SessionHandle {
-  sessionId: string;
+  sessionId: string;       // Our own ID (UUID)
   projectId: string;
   mode: 'sdk' | 'pty';
   status: 'active' | 'paused' | 'ended';
@@ -122,9 +127,20 @@ interface SessionHandle {
   lastActivityAt: Date;
 }
 
+/**
+ * State kept for an active SDK query turn.
+ * There is no persistent "AgentSDKSession" object — only a generator per turn.
+ */
+interface SdkTurnState {
+  query: Query;                   // The AsyncGenerator for the current turn
+  sdkSessionId: string;           // Captured from the 'system init' message; used for resume
+  abortController: AbortController;
+}
+
 class SessionManager {
   private sessions: Map<string, SessionHandle> = new Map();
-  private sdkSessions: Map<string, AgentSDKSession> = new Map();
+  /** Active SDK turn generators (one per in-flight turn) */
+  private sdkTurns: Map<string, SdkTurnState> = new Map();
   private ptySessions: Map<string, PtyHandle> = new Map();
 
   async create(projectId: string, opts: CreateSessionOpts): Promise<SessionHandle>;
@@ -146,10 +162,13 @@ create(projectId, opts)
 [Load project .claude/ settings]
   |
   v
-[Create Agent SDK session with settingSources=['project']]
+[Call query() — returns AsyncGenerator]
   |
   v
-[Register in sessions map]
+[Consume 'system init' msg → capture sdkSessionId]
+  |
+  v
+[Register in sessions map, store sdkSessionId]
   |
   v
 [Emit session.created event]
@@ -157,92 +176,193 @@ create(projectId, opts)
   v
 [Ready for user.message]
   |
-  +---> send(message) ---> [Stream assistant.delta events] ---> [assistant.message]
+  +---> send(message) ---> [call query({ prompt, options: { resume: sdkSessionId } })]
   |                              |
-  |                         [Tool requested?]
+  |                    for await (msg of generator)
   |                              |
-  |                    yes: tool.requested event
+  |                    msg.type === 'stream_event'  →  assistant.delta event
+  |                    msg.type === 'assistant'      →  assistant.message event
+  |                    msg.type === 'tool_use'       →  tool.requested event
   |                              |
-  |                    [canUseTool check]
+  |                    [canUseTool hook called by SDK]
   |                         |         |
   |                    auto-approve   needs-approval
+  |                  (return { behavior: 'allow',  (emit approval.requested,
+  |                   updatedInput })               pause generator via Promise)
   |                         |              |
-  |                    [execute]    [approval.requested]
+  |                         |         [Wait for UI resolution]
   |                         |              |
-  |                         |         [PAUSE SDK]
-  |                         |              |
-  |                         |         [Wait for resolution]
-  |                         |              |
-  |                         |         [approval.resolved]
-  |                         |              |
-  |                         |    approved?--+--denied?
-  |                         |       |            |
-  |                         |  [execute]   [skip tool]
-  |                         |       |            |
-  |                         +-------+------------+
+  |                         |    approved? → { behavior: 'allow', updatedInput }
+  |                         |    denied?  → { behavior: 'deny', message, interrupt? }
+  |                         |
+  |                    [PostToolUse hook → tool.output / tool.completed events]
   |                              |
-  |                    [tool.output event]
-  |                    [tool.completed event]
-  |                              |
-  |                    [Continue SDK loop]
+  |                    [Continue SDK generator loop]
   |
-  +---> end() ---> [session.ended event] ---> [Cleanup]
+  +---> end() ---> [abortController.abort()] ---> [session.ended event] ---> [Cleanup]
 ```
 
-### SDK Session Creation Detail
+### SDK Session Creation and Turn Execution Detail
 
 ```typescript
-async createSDKSession(projectId: string, sessionId: string): Promise<void> {
-  const project = this.projectScanner.getProject(projectId);
+import { query } from '@anthropic-ai/claude-code';
 
-  const session = await agentSDK.createSession({
-    projectPath: project.path,
-    sessionId,
-    settingSources: this.config.sdk.settingSources,
-    canUseTool: (tool, args) => this.toolApproval.evaluate(sessionId, tool, args),
+async sendMessage(sessionId: string, prompt: string): Promise<void> {
+  const session = this.sessions.get(sessionId);
+  if (!session) throw new Error(`Unknown session: ${sessionId}`);
+
+  const project = this.projectScanner.getProject(session.projectId);
+  const abortController = new AbortController();
+
+  // Look up stored SDK session ID so the SDK can resume server-side state
+  const storedSdkSessionId = this.sdkSessionIds.get(sessionId);
+
+  const gen = query({
+    prompt,
+    options: {
+      cwd: project.path,
+      // Resume existing server-side session if we have one
+      ...(storedSdkSessionId ? { resume: storedSdkSessionId } : {}),
+      // Permission control: the SDK calls this before every tool execution
+      canUseTool: (toolName, input, { signal }) =>
+        this.toolApproval.evaluate(sessionId, toolName, input, signal),
+      // PostToolUse hook: called after every tool completes
+      postToolUse: async (toolName, input, output) => {
+        this.emitEvent('tool.output', sessionId, session.projectId, {
+          toolName,
+          input,
+          output: output.output,
+          isError: output.isError ?? false,
+        });
+      },
+      // Streaming deltas: produces SDKPartialAssistantMessage with type='stream_event'
+      includePartialMessages: true,
+      // Agentic turn limit
+      maxTurns: this.config.sdk.maxTurns,
+      // MCP servers: passed natively to the SDK (no CLI shim needed)
+      mcpServers: this.mcpWrapper.getNativeServers(),
+      // Ensure AskUserQuestion is always reachable when tool lists are restricted
+      allowedTools: opts.allowedTools
+        ? [...new Set([...opts.allowedTools, 'AskUserQuestion'])]
+        : undefined,
+      abortSignal: abortController.signal,
+    },
   });
 
-  // Wire up event streaming
-  session.on('assistant:delta', (delta) => {
-    this.emitEvent('assistant.delta', sessionId, projectId, {
-      delta: delta.text,
-      index: delta.index,
-    });
-  });
+  // Store turn state
+  this.sdkTurns.set(sessionId, { query: gen, sdkSessionId: storedSdkSessionId ?? '', abortController });
 
-  session.on('assistant:message', (message) => {
-    this.emitEvent('assistant.message', sessionId, projectId, {
-      content: message.content,
-      model: message.model,
-      usage: message.usage,
-    });
-  });
+  // Consume the generator
+  for await (const msg of gen) {
+    session.lastActivityAt = new Date();
 
-  session.on('tool:requested', (tool) => {
-    this.emitEvent('tool.requested', sessionId, projectId, {
-      toolId: tool.id,
-      toolName: tool.name,
-      args: tool.args,
-    });
-  });
+    if (msg.type === 'system' && msg.subtype === 'init') {
+      // Capture SDK session ID on the very first message of a new session
+      if (!storedSdkSessionId) {
+        this.sdkSessionIds.set(sessionId, msg.session_id);
+        this.sdkTurns.get(sessionId)!.sdkSessionId = msg.session_id;
+      }
+      this.emitEvent('session.created', sessionId, session.projectId, {
+        sdkSessionId: msg.session_id,
+      });
+      continue;
+    }
 
-  session.on('tool:output', (tool) => {
-    this.emitEvent('tool.output', sessionId, projectId, {
-      toolId: tool.id,
-      output: tool.output,
-      isError: tool.isError,
-    });
-  });
+    if (msg.type === 'stream_event') {
+      // Partial assistant text delta (requires includePartialMessages: true)
+      const delta = msg.message?.delta;
+      if (delta?.type === 'text_delta') {
+        this.emitEvent('assistant.delta', sessionId, session.projectId, {
+          delta: delta.text,
+        });
+      }
+      continue;
+    }
 
-  this.sdkSessions.set(sessionId, session);
+    if (msg.type === 'assistant') {
+      this.emitEvent('assistant.message', sessionId, session.projectId, {
+        content: msg.message.content,
+        model: msg.message.model,
+        usage: msg.message.usage,
+      });
+      continue;
+    }
+
+    if (msg.type === 'tool_use') {
+      this.emitEvent('tool.requested', sessionId, session.projectId, {
+        toolId: msg.id,
+        toolName: msg.name,
+        args: msg.input,
+      });
+      continue;
+    }
+
+    if (msg.type === 'result') {
+      this.emitEvent('turn.completed', sessionId, session.projectId, {
+        stopReason: msg.stop_reason,
+        usage: msg.usage,
+      });
+    }
+  }
+
+  this.sdkTurns.delete(sessionId);
 }
 ```
 
+### Session Resume
+
+To resume a session across Runner restarts or new browser tabs, store `sdkSessionId` in the session record and pass it back to `query()`:
+
+```typescript
+// On a subsequent user message for an existing session:
+const gen = query({
+  prompt: userMessage,
+  options: {
+    resume: storedSdkSessionId,   // Tells SDK to reattach to existing server-side session
+    cwd: project.path,
+    canUseTool: ...,
+    maxTurns: this.config.sdk.maxTurns,
+  },
+});
+```
+
+### Stream Adapter
+
+The stream adapter translates raw SDK generator messages into protocol `EventEnvelope` objects. The key message types are:
+
+| SDK `msg.type`   | `msg.subtype` / notes                         | Protocol event emitted       |
+|------------------|-----------------------------------------------|------------------------------|
+| `system`         | `init` — first message, contains `session_id` | `session.created`            |
+| `stream_event`   | Requires `includePartialMessages: true`; `msg.message.delta.type === 'text_delta'` | `assistant.delta` |
+| `assistant`      | Full assistant turn message                   | `assistant.message`          |
+| `tool_use`       | SDK is about to call a tool                   | `tool.requested`             |
+| `result`         | Turn finished, contains `stop_reason`         | `turn.completed`             |
+
+Tool output is delivered via the `postToolUse` hook (not as a generator message) and maps directly to a `tool.output` event.
+
 ## 4. `canUseTool` Implementation
+
+### SDK Signature
+
+The Agent SDK calls `canUseTool` with the following exact signature before every tool execution. The hook must return a `PermissionResult` — **not** a plain boolean.
+
+```typescript
+// Exact SDK type signature
+type CanUseTool = (
+  toolName: string,
+  input: ToolInput,
+  options: { signal: AbortSignal },
+) => Promise<PermissionResult>;
+
+// PermissionResult discriminated union
+type PermissionResult =
+  | { behavior: 'allow'; updatedInput: ToolInput }   // Allow, optionally with modified input
+  | { behavior: 'deny'; message: string; interrupt?: boolean }; // Deny with user-visible message
+```
 
 ### Approval Flow
 
-The `canUseTool` callback is the mechanism by which the Runner pauses the Agent SDK and requests user approval.
+The `canUseTool` hook is the mechanism by which the Runner pauses the Agent SDK generator and requests user approval. Because `for await` suspends at each `yield`, simply not resolving the `Promise` returned by `canUseTool` is sufficient to hold the SDK in place until the UI responds.
 
 ```typescript
 interface ApprovalRule {
@@ -258,18 +378,27 @@ interface PendingApproval {
   approvalId: string;
   sessionId: string;
   toolName: string;
-  args: Record<string, unknown>;
-  resolve: (decision: ApprovalDecision) => void;
+  input: ToolInput;
+  resolve: (result: PermissionResult) => void;
   reject: (error: Error) => void;
   timeoutHandle: NodeJS.Timeout;
   requestedAt: Date;
 }
 
+/**
+ * Decision sent by the UI (POST /sessions/:id/approve).
+ * The runner converts this into the SDK's PermissionResult.
+ */
 interface ApprovalDecision {
   decision: 'allow' | 'deny';
   persist: boolean;
   scope?: 'session' | 'project' | 'user';
-  modifiedArgs?: Record<string, unknown>;
+  /** Optionally override the tool's input arguments (only meaningful when decision='allow') */
+  modifiedInput?: ToolInput;
+  /** Deny message shown to Claude (only meaningful when decision='deny') */
+  denyMessage?: string;
+  /** If true, SDK should stop the entire agentic loop (only meaningful when decision='deny') */
+  interrupt?: boolean;
 }
 
 class ToolApproval {
@@ -278,38 +407,44 @@ class ToolApproval {
   private permissionMode: PermissionMode = 'default';
 
   /**
-   * Called by Agent SDK canUseTool callback.
-   * Returns a Promise that resolves when the user makes a decision.
+   * Implements the SDK canUseTool signature.
+   * Called by the SDK before every tool execution.
+   * Returns a PermissionResult that either allows (with updated input) or denies.
    */
   async evaluate(
     sessionId: string,
-    tool: ToolRequest,
-    args: Record<string, unknown>,
-  ): Promise<boolean> {
+    toolName: string,
+    input: ToolInput,
+    signal: AbortSignal,
+  ): Promise<PermissionResult> {
     // 1. Check permission mode
     if (this.permissionMode === 'dontAsk' || this.permissionMode === 'bypassPermissions') {
-      return true;
+      return { behavior: 'allow', updatedInput: input };
     }
     if (this.permissionMode === 'plan') {
-      return false; // Deny all tool execution in plan mode
+      // Deny all tool execution in plan mode
+      return { behavior: 'deny', message: 'Tool execution is disabled in plan mode.' };
     }
-    if (this.permissionMode === 'acceptEdits' && isEditTool(tool.name)) {
-      return true;
+    if (this.permissionMode === 'acceptEdits' && isEditTool(toolName)) {
+      return { behavior: 'allow', updatedInput: input };
     }
 
     // 2. Check persisted approval rules (most specific first)
-    const matchingRule = this.findMatchingRule(sessionId, tool.name, args);
+    const matchingRule = this.findMatchingRule(sessionId, toolName, input);
     if (matchingRule) {
-      return matchingRule.decision === 'allow';
+      return matchingRule.decision === 'allow'
+        ? { behavior: 'allow', updatedInput: input }
+        : { behavior: 'deny', message: `Denied by persisted rule for ${toolName}.` };
     }
 
-    // 3. No matching rule: pause and request approval from UI
-    const decision = await this.requestApproval(sessionId, tool, args);
+    // 3. No matching rule: pause and request approval from UI.
+    //    The Promise blocks the SDK generator until the UI calls resolveApproval().
+    const decision = await this.requestApproval(sessionId, toolName, input, signal);
 
     // 4. Persist rule if requested
     if (decision.persist && decision.scope) {
       this.rules.push({
-        toolName: tool.name,
+        toolName,
         decision: decision.decision,
         scope: decision.scope,
         scopeId: this.getScopeId(sessionId, decision.scope),
@@ -317,31 +452,52 @@ class ToolApproval {
       });
     }
 
-    return decision.decision === 'allow';
+    // 5. Convert UI decision to SDK PermissionResult
+    if (decision.decision === 'allow') {
+      return {
+        behavior: 'allow',
+        updatedInput: decision.modifiedInput ?? input,
+      };
+    } else {
+      return {
+        behavior: 'deny',
+        message: decision.denyMessage ?? `Tool "${toolName}" was denied by the user.`,
+        interrupt: decision.interrupt,
+      };
+    }
   }
 
   /**
    * Creates a pending approval and emits approval.requested event.
    * Returns a Promise that blocks until the UI resolves the approval.
+   * Rejects if the AbortSignal fires (session cancelled) or timeout expires.
    */
   private requestApproval(
     sessionId: string,
-    tool: ToolRequest,
-    args: Record<string, unknown>,
+    toolName: string,
+    input: ToolInput,
+    signal: AbortSignal,
   ): Promise<ApprovalDecision> {
     return new Promise((resolve, reject) => {
       const approvalId = generateId('appr');
 
       const timeoutHandle = setTimeout(() => {
         this.pending.delete(approvalId);
-        reject(new Error(`Approval timeout for tool ${tool.name}`));
+        reject(new Error(`Approval timeout for tool ${toolName}`));
       }, this.config.sdk.approvalTimeoutMs);
+
+      // Abort if the session is cancelled mid-wait
+      signal.addEventListener('abort', () => {
+        clearTimeout(timeoutHandle);
+        this.pending.delete(approvalId);
+        reject(new Error(`Approval cancelled for tool ${toolName}`));
+      }, { once: true });
 
       this.pending.set(approvalId, {
         approvalId,
         sessionId,
-        toolName: tool.name,
-        args,
+        toolName,
+        input,
         resolve,
         reject,
         timeoutHandle,
@@ -352,15 +508,16 @@ class ToolApproval {
       this.eventEmitter.emit('approval.requested', {
         approvalId,
         sessionId,
-        toolName: tool.name,
-        args,
-        riskLevel: this.assessRisk(tool.name, args),
+        toolName,
+        input,
+        riskLevel: this.assessRisk(toolName, input),
       });
     });
   }
 
   /**
-   * Called when UI sends POST /sessions/:id/approve
+   * Called when UI sends POST /sessions/:id/approve.
+   * Resolves the pending Promise, unblocking the SDK generator.
    */
   resolveApproval(approvalId: string, decision: ApprovalDecision): void {
     const pending = this.pending.get(approvalId);
@@ -388,7 +545,7 @@ class ToolApproval {
   private findMatchingRule(
     sessionId: string,
     toolName: string,
-    args: Record<string, unknown>,
+    input: ToolInput,
   ): ApprovalRule | undefined {
     const session = this.sessionManager.get(sessionId);
     if (!session) return undefined;
@@ -413,7 +570,7 @@ class ToolApproval {
     return undefined;
   }
 
-  private assessRisk(toolName: string, args: Record<string, unknown>): 'low' | 'medium' | 'high' {
+  private assessRisk(toolName: string, input: ToolInput): 'low' | 'medium' | 'high' {
     const highRisk = ['bash', 'execute_command', 'run_terminal_command'];
     const mediumRisk = ['write_file', 'edit_file', 'delete_file'];
     if (highRisk.includes(toolName)) return 'high';
