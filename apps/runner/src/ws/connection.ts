@@ -2,6 +2,7 @@ import { WebSocket } from 'ws'
 import { WsClientMessageSchema } from '@claude-ui/protocol'
 import { createLogger } from '@claude-ui/shared'
 import { broadcaster } from './broadcaster.js'
+import { ptyAdapter } from '../pty/pty-adapter.js'
 
 const logger = createLogger({ name: 'ws:connection' })
 
@@ -41,6 +42,10 @@ export function handleConnection(ws: WebSocket): void {
       }
       case 'ping': {
         ws.send(JSON.stringify({ type: 'pong', ts: msg.ts }))
+        break
+      }
+      case 'pty.stdin': {
+        ptyAdapter.write(msg.sessionId, msg.data)
         break
       }
     }

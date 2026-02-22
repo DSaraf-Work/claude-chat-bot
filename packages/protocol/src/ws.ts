@@ -21,10 +21,17 @@ export const WsPingSchema = z.object({
   ts: z.string(),
 })
 
+export const WsPtyStdinSchema = z.object({
+  type: z.literal('pty.stdin'),
+  sessionId: z.string(),
+  data: z.string(),
+})
+
 export const WsClientMessageSchema = z.discriminatedUnion('type', [
   WsSubscribeSchema,
   WsUnsubscribeSchema,
   WsPingSchema,
+  WsPtyStdinSchema,
 ])
 export type WsClientMessage = z.infer<typeof WsClientMessageSchema>
 

@@ -4,6 +4,7 @@ import type { RunnerConfig } from './config/schema.js'
 import authPlugin from './auth/middleware.js'
 import projectsRouter from './projects/router.js'
 import sessionsRouter from './sessions/router.js'
+import ptyRouter from './pty/router.js'
 import { attachWebSocketServer } from './ws/server.js'
 
 export async function buildServer(config: RunnerConfig) {
@@ -22,6 +23,7 @@ export async function buildServer(config: RunnerConfig) {
   // Routes
   await fastify.register(projectsRouter, { config, logger })
   await fastify.register(sessionsRouter, { config })
+  await fastify.register(ptyRouter, { config })
 
   // WebSocket server (token auth on HTTP upgrade)
   const wss = attachWebSocketServer(fastify, config.auth.token!)
