@@ -46,7 +46,11 @@ const sessionsRouter: FastifyPluginAsync<SessionsRouterOpts> = async (fastify, o
     { preHandler: [fastify.authenticate] },
     async (request) => {
       const sessions = sessionManager.listSessions(request.params.projectId)
-      return { sessions }
+      return {
+        sessions: sessions.map(({ sessionId, projectId, permissionMode, status, sdkSessionId }) => ({
+          sessionId, projectId, permissionMode, status, sdkSessionId,
+        })),
+      }
     },
   )
 

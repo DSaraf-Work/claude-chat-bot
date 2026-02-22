@@ -1,5 +1,5 @@
+import { createHash } from 'node:crypto'
 import type { FastifyPluginAsync } from 'fastify'
-import { newProjectId } from '@claude-ui/shared'
 import { discoverProjects, type DiscoveredProject } from './scanner.js'
 import type { RunnerConfig } from '../config/schema.js'
 import type { Logger } from '@claude-ui/shared'
@@ -24,7 +24,7 @@ const projectsRouter: FastifyPluginAsync<ProjectsRouterOpts> = async (fastify, o
       })
 
       const projectsList = discovered.map((p: DiscoveredProject) => ({
-        id: newProjectId(), // deterministic in real impl; stateless scan for now
+        id: 'proj_' + createHash('sha256').update(p.rootPath).digest('hex').slice(0, 16),
         name: p.name,
         rootPath: p.rootPath,
         gitRemote: p.gitRemote,
