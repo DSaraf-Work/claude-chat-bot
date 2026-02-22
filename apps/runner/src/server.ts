@@ -3,6 +3,7 @@ import { createLogger } from '@claude-ui/shared'
 import type { RunnerConfig } from './config/schema.js'
 import authPlugin from './auth/middleware.js'
 import projectsRouter from './projects/router.js'
+import { attachWebSocketServer } from './ws/server.js'
 
 export async function buildServer(config: RunnerConfig) {
   const logger = createLogger({ name: 'runner', level: config.logLevel })
@@ -20,5 +21,8 @@ export async function buildServer(config: RunnerConfig) {
   // Routes
   await fastify.register(projectsRouter, { config, logger })
 
-  return { fastify, logger }
+  // WebSocket server (token auth on HTTP upgrade)
+  const wss = attachWebSocketServer(fastify, config.auth.token!)
+
+  return { fastify, logger, wss }
 }

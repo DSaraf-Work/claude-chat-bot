@@ -15,7 +15,8 @@
   "devDependencies": {
     "typescript": "*",
     "vitest": "^2.0.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0"
   },
   "dependencies": {
     "@claude-ui/protocol": "workspace:*",
@@ -24,6 +25,7 @@
     "fastify-plugin": "^5.0.0",
     "yaml": "^2.4.0",
     "zod": "^3.23.0",
-    "pino": "^9.3.0"
+    "pino": "^9.3.0",
+    "ws": "^8.18.0"
   }
 }
